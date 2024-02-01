@@ -1,60 +1,55 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import JSONResponse
-from io import BytesIO
+from transformers import DetrImageProcessor, DetrForObjectDetection
+import torch
 from PIL import Image
 import requests
-import torch
-from torchvision import transforms
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+import time
+
+
+print('Device Count:', torch.cuda.device_count())
+device = 'cuda' if torch.cuda.device_count() > 0 else 'cpu'
 
 app = FastAPI()
 
-DETR_MODEL = "facebook/detr-resnet-50"
-DETR_THRESHOLD = 0.5  # You can adjust the threshold as needed
+print('Using Device:', device)
 
-# Load the model
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = torch.hub.load('facebookresearch/detr', 'detr_resnet50', pretrained=True)
-model = model.to(device).eval()
+# you can specify the revision tag if you don't want the timm dependency
+processor = DetrImageProcessor.from_pretrained("facebook/detr-resnet-50", revision="no_timm")
+model = DetrForObjectDetection.from_pretrained("facebook/detr-resnet-50", revision="no_timm").to(device)
 
-# Preprocess image
-def preprocess_image(image_bytes):
-    image = Image.open(BytesIO(image_bytes)).convert("RGB")
-    transform = transforms.Compose([
-        transforms.Resize((800, 800)),
-        transforms.ToTensor(),
-    ])
-    image_tensor = transform(image).unsqueeze(0)
-    return image_tensor
+def get_objects(url):
+    image = Image.open(requests.get(url, stream=True).raw)
 
-# Perform object detection
-def detect_objects(image_tensor):
-    with torch.no_grad():
-        outputs = model(image_tensor)
-    return outputs
+    inputs = processor(images=image, return_tensors="pt").to(device)
+    start = time.time()
+    outputs = model(**inputs)
+    end = time.time()
+    # convert outputs (bounding boxes and class logits) to COCO API
+    # let's only keep detections with score > 0.9
+    target_sizes = torch.tensor([image.size[::-1]])
+    results = processor.post_process_object_detection(outputs, target_sizes=target_sizes, threshold=0.9)[0]
 
-# Define FastAPI endpoint
-@app.post("/detect")
-async def detect_objects_endpoint(file: UploadFile = File(...)):
-    try:
-        image_tensor = preprocess_image(await file.read())
-        outputs = detect_objects(image_tensor)
-        
-        # Filter detections based on confidence threshold
-        filtered_detections = [
-            {"label": int(label), "score": float(score),
-             "box": [float(coord) for coord in box]}
-            for label, score, box in zip(outputs["labels"][0].cpu().numpy(),
-                                        outputs["scores"][0].cpu().numpy(),
-                                        outputs["boxes"][0].cpu().numpy())
-            if score > DETR_THRESHOLD
-        ]
+    res = {}
+    res['objects'] = []
+    for score, label, box in zip(results["scores"], results["labels"], results["boxes"]):
+        box = [round(i, 2) for i in box.tolist()]
+        data = {
+            'object_name': model.config.id2label[label.item()],
+            'confidence': round(score.item(), 3),
+            'location': box
+        }
+        res['objects'].append(data)
 
-        return JSONResponse(content={"detections": filtered_detections})
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    res['latency'] = end - start
+    res['device'] = str(model.device)
+    return res
+
+@app.get("/detect")
+def detect(url: str):
+    return JSONResponse(get_objects(url))
 
 # Run the application with UVicorn
 if __name__ == "__main__":
     import uvicorn
-
     uvicorn.run(app, host="0.0.0.0", port=8000)
