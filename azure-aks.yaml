@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
       - name: obj-det-app
-        image: digitalvillage132da3e8.azurecr.io/ibam/obj-det-app:#{Build.BuildId}#
+        image: digitalvillage132da3e8.azurecr.io/object-detection:latest
         ports:
         - containerPort: 8000
 # service type loadbalancer       
@@ -28,6 +28,6 @@ spec:
     app: obj-det-app
   ports:
     - protocol: TCP
-      port: 8000
+      port: 80
       targetPort: 8000
   type: LoadBalancer

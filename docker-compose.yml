@@ -4,6 +4,7 @@ services:
   fastapi-detr:
     build:
       context: .
+    image: digitalvillage132da3e8.azurecr.io/object-detection:latest
     ports:
       - "8000:8000"
     deploy:
